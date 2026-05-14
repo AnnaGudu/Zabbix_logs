@@ -1,0 +1,8 @@
+user@juicy:~$ cat /etc/zabbix/zabbix_agentd.d/tcp_states.conf 
+UserParameter=tcp.syn_recv,ss -ant 2>/dev/null | grep "SYN-RECV" | grep -c "172.17.0" 
+UserParameter=tcp.time_wait,ss -ant 2>/dev/null | grep "TIME_WAIT" | grep -c "172.17.0"
+UserParameter=tcp.close_wait,ss -ant 2>/dev/null | grep "CLOSE_WAIT" | grep -c "172.17.0"
+UserParameter=tcp.established,ss -ant 2>/dev/null | grep "ESTABLISHED" | grep -c "172.17.0"
+UserParameter=tcp.total,ss -ant 2>/dev/null | grep "172.17.0" | grep -v "LISTEN" | wc -l
+UserParameter=juiceshop.http_errors,docker logs juice-shop --since 60s 2>/dev/null | grep -c "[45][0-9][0-9]"
+user@juicy:~$

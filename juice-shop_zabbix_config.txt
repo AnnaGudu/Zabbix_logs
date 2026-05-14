@@ -1,0 +1,200 @@
+zabbix_export:
+  version: '7.0'
+  host_groups:
+    - uuid: dc579cd7a1a34222933f24f52a68bcd8
+      name: 'Linux servers'
+  hosts:
+    - host: juice-shop
+      name: juice-shop
+      templates:
+        - name: 'Linux by Zabbix agent'
+      groups:
+        - name: 'Linux servers'
+      interfaces:
+        - ip: 192.168.10.30
+          interface_ref: if1
+      items:
+        - name: 'DDoS Threat Score'
+          type: CALCULATED
+          key: ddos.threat.score
+          delay: 10s
+          value_type: FLOAT
+          params: '0.35 * min(10, last(/juice-shop/net.if.in[enp0s3,packets]) / 500) + 0.35 * min(10, last(/juice-shop/tcp.syn_recv) / 50) + 0.20 * min(10, last(/juice-shop/system.cpu.load[all,avg1]) / 2) + 0.10 * min(10, last(/juice-shop/web.test.time[JuiceShop Monitoring,Main,resp]) / 0.5)'
+        - name: 'JucieShop: HTTP 4xx/5xx errors per minute'
+          key: juiceshop.http_errors
+          units: errors
+          interface_ref: if1
+        - name: 'Traffic Inbound'
+          key: 'net.if.in[enp0s3,bytes]'
+          delay: 5s
+          units: Bps
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          interface_ref: if1
+        - name: 'Dropped packets'
+          key: 'net.if.in[enp0s3,dropped]'
+          delay: 10s
+          units: pps
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          interface_ref: if1
+          triggers:
+            - expression: 'avg(/juice-shop/net.if.in[enp0s3,dropped],1m)>10'
+              name: 'JuiceShop: NIC buffer overflow - packets being dropped'
+              opdata: 'Dropped: {ITEM.VALUE1} pps'
+              priority: WARNING
+              manual_close: 'YES'
+        - name: 'Errors inbound enp0s3'
+          key: 'net.if.in[enp0s3,errors]'
+          delay: 30s
+          units: num
+          interface_ref: if1
+        - name: 'Inbound packets per sec'
+          key: 'net.if.in[enp0s3,packets]'
+          delay: 5s
+          units: pps
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          interface_ref: if1
+          triggers:
+            - expression: 'avg(/juice-shop/net.if.in[enp0s3,packets],1m)>3000'
+              name: 'Juice Shop CRITICAL  packet rate - active flood detected'
+              opdata: 'Current: {ITEM.LASTVALUE1} pps'
+              priority: HIGH
+              manual_close: 'YES'
+            - expression: 'avg(/juice-shop/net.if.in[enp0s3,packets],1m)>1000'
+              name: 'Juice Shop HIGH Incoming packet rate (possible flood)'
+              opdata: 'Current: {ITEM.LASTVALUE1} pps'
+              priority: AVERAGE
+              manual_close: 'YES'
+        - name: 'Traffic Outbound'
+          key: 'net.if.out[enp0s3,bytes]'
+          delay: 5s
+          units: Bps
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          interface_ref: if1
+        - name: 'Errors outbound enp0s3'
+          key: 'net.if.out[enp0s3,errors]'
+          delay: 30s
+          units: num
+          interface_ref: if1
+        - name: 'Outbound packets per sec'
+          key: 'net.if.out[enp0s3,packets]'
+          delay: 5s
+          units: pps
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          interface_ref: if1
+        - name: 'TCP listen connections on victim'
+          key: 'net.tcp.listen[3000]'
+          delay: 5s
+          units: connections
+          description: 'Full TCP-connections. Legitime active user''s sessions with Juice Shop'
+          interface_ref: if1
+        - name: 'Port 3000 TCP availability'
+          key: 'net.tcp.port[,3000]'
+          delay: 10s
+          units: con
+          description: |
+            1 - Port is open and running
+            0 - Port is closed
+          interface_ref: if1
+        - name: 'CPU load avg'
+          key: system.cpu.load
+          delay: 10s
+          value_type: FLOAT
+          description: 'Normal = LA < Num, CPU'
+          interface_ref: if1
+        - name: 'Swap space used'
+          key: 'system.swap.size[,used]'
+          delay: 30s
+          units: B
+          interface_ref: if1
+        - name: 'TCP connections CLOSE-WAIT'
+          key: tcp.close_wait
+          delay: 5s
+          units: connections
+          description: 'Remoted side closed connection, but application doesn''t close connection yet'
+          interface_ref: if1
+        - name: 'TCP connections SYN-RECV (half-open)'
+          key: tcp.syn_recv
+          delay: 5s
+          units: connections
+          description: 'Half-opened - server had SYN, sent SYN-ACK, but have no final ACK'
+          interface_ref: if1
+          triggers:
+            - expression: last(/juice-shop/tcp.syn_recv)>50
+              name: 'Juice Shop: SYN-flood suspected - half-open TCP connections'
+              opdata: 'SYN-RECV: {ITEM.LASTVALUE1}'
+              priority: HIGH
+              manual_close: 'YES'
+        - name: 'TCP connections TIME-WAIT'
+          key: tcp.time_wait
+          delay: 5s
+          units: connections
+          description: 'Connections waiting for final ASK'
+          interface_ref: if1
+        - name: 'TCP connections TOTAL'
+          key: tcp.total
+          delay: 5s
+          units: connections
+          description: 'Summarize count of TCP-connections'
+          interface_ref: if1
+        - name: (buffers)
+          key: 'vm.memory.size[buffers]'
+          delay: 30s
+          units: B
+          interface_ref: if1
+        - name: 'Memory used'
+          key: 'vm.memory.size[used]'
+          delay: 30s
+          units: B
+          description: 'Using RAM in bytes'
+          interface_ref: if1
+      httptests:
+        - name: 'JuiceShop Monitoring'
+          delay: 10s
+          attempts: '2'
+          steps:
+            - name: Main
+              url: 'http://192.168.10.30:3000/'
+              timeout: 5s
+              status_codes: '200,304'
+          tags:
+            - tag: service
+              value: juiceshop
+      inventory_mode: DISABLED
+  triggers:
+    - expression: 'avg(/juice-shop/system.cpu.util[,system],2m)>70'
+      name: 'Juice Shop: High CPU system time - network/kernel overload'
+      opdata: 'CPU system: {ITEM.LASTVALUE1}%'
+      priority: WARNING
+      manual_close: 'YES'
+    - expression: 'min(/juice-shop/web.test.rspcode[JuiceShop Monitoring,Main],#3)<>200'
+      name: 'Juice Shop: HTTP response is not 200 OK'
+      opdata: 'HTTP code: {ITEM.LASTVALUE1}'
+      priority: HIGH
+      manual_close: 'YES'
+    - expression: 'last(/juice-shop/web.test.time[JuiceShop Monitoring,Main,resp])>5'
+      name: 'Response time Juice Shop HIGH'
+      event_name: 'Juice Shop response time > 5s'
+      opdata: 'Response: {ITEM.LASTVALUE1}s'
+      priority: HIGH
+      manual_close: 'YES'
+    - expression: 'last(/juice-shop/web.test.time[JuiceShop Monitoring,Main,resp])>2'
+      name: 'Response time Juice Shop WARNING'
+      event_name: 'Juice Shop response time > 2s'
+      opdata: 'Response: {ITEM.LASTVALUE1}s'
+      priority: WARNING
+      manual_close: 'YES'

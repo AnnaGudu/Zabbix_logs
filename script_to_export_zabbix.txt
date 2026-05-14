@@ -1,0 +1,160 @@
+#!/bin/bash
+# export_zabbix_metrics.sh — выгрузка метрик из PostgreSQL в CSV
+
+# Настройки подключения
+DB_USER="zabbix"
+DB_PASS="password"
+DB_NAME="zabbix"
+DB_HOST="localhost"
+HOST_NAME="juice-shop"
+
+export PGPASSWORD="$DB_PASS"
+
+# Временные диапазоны (UTC)
+BASELINE_FROM="2026-04-29 20:10:00"
+BASELINE_TO="2026-04-29 21:59:00"
+ATTACK_FROM="2026-04-29 21:00:00"
+ATTACK_TO="2026-04-29 21:12:00"
+RECOVERY_FROM="2026-04-29 21:12:00"
+RECOVERY_TO="2026-04-29 21:20:00"
+
+OUT_DIR="./zabbix_export"
+mkdir -p "$OUT_DIR"
+
+run_sql() {
+    psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -t -A -c "$1" 2>/dev/null
+}
+
+# Метрики: ключ -> имя_файла|таблица
+declare -A METRICS
+METRICS["net.if.in[enp0s3,bytes]"]="inbound_bps|history_uint"
+METRICS["net.if.out[enp0s3,bytes]"]="outbound_bps|history_uint"
+METRICS["net.if.in[enp0s3,packets]"]="inbound_pps|history_uint"
+METRICS["net.if.out[enp0s3,packets]"]="outbound_pps|history_uint"
+METRICS["net.if.in[enp0s3,dropped]"]="dropped_pkts|history_uint"
+METRICS["system.cpu.load"]="cpu_loadavg|history"
+METRICS["system.cpu.util[,user]"]="cpu_user_pct|history"
+METRICS["system.cpu.util[,system]"]="cpu_system_pct|history"
+METRICS["vm.memory.size[used]"]="mem_used_bytes|history_uint"
+METRICS["vm.memory.size[available]"]="mem_available_bytes|history_uint"
+METRICS["system.swap.size[used]"]="swap_used_bytes|history_uint"
+METRICS["tcp.syn_recv"]="tcp_syn_recv|history_uint"
+METRICS["tcp.established"]="tcp_established|history_uint"
+METRICS["tcp.total"]="tcp_total|history_uint"
+METRICS["tcp.close_wait"]="tcp_close_wait|history_uint"
+METRICS["tcp.time_wait"]="tcp_time_wait|history_uint"
+METRICS["net.tcp.port[,3000]"]="tcp_port_3000|history_uint"
+METRICS["net.tcp.listen[3000]"]="tcp_listen_3000|history_uint"
+METRICS["web.test.time[JuiceShop Monitoring,Main,resp]"]="response_time_sec|history"
+METRICS["ddos.threat.score"]="ddos_threat_score|history"
+
+# Функция экспорта одной метрики за фазу
+export_metric() {
+    local key="$1"
+    local fname="$2"
+    local htable="$3"
+    local t_from="$4"
+    local t_to="$5"
+    local phase="$6"
+
+    local outfile="${OUT_DIR}/${phase}_${fname}.csv"
+    local ts_from ts_to
+    ts_from=$(run_sql "SELECT EXTRACT(EPOCH FROM TIMESTAMP '${t_from}')::bigint;")
+    ts_to=$(run_sql "SELECT EXTRACT(EPOCH FROM TIMESTAMP '${t_to}')::bigint;")
+
+    echo "timestamp,value" > "$outfile"
+    psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -t -A -F',' -c "
+SELECT
+    TO_TIMESTAMP(h.clock)::text,
+    h.value
+FROM ${htable} h
+JOIN items i ON h.itemid = i.itemid
+JOIN hosts hh ON i.hostid = hh.hostid
+WHERE hh.name = '${HOST_NAME}'
+  AND i.key_ = '${key}'
+  AND h.clock BETWEEN ${ts_from} AND ${ts_to}
+ORDER BY h.clock;" 2>/dev/null >> "$outfile"
+
+    local rows
+    rows=$(tail -n +2 "$outfile" | wc -l)
+    if [ "$rows" -eq 0 ]; then
+        echo "  [WARN] $key — нет данных (${t_from} .. ${t_to})"
+        rm -f "$outfile"
+    else
+        echo "  [OK]   $key → $outfile ($rows строк)"
+    fi
+}
+
+# Основной цикл по фазам
+echo "Хост: $HOST_NAME | База: $DB_NAME"
+for key in "${!METRICS[@]}"; do
+    IFS="|" read -r fname htable <<< "${METRICS[$key]}"
+    export_metric "$key" "$fname" "$htable" "$BASELINE_FROM" "$BASELINE_TO" "baseline"
+    export_metric "$key" "$fname" "$htable" "$ATTACK_FROM"   "$ATTACK_TO"   "attack"
+    export_metric "$key" "$fname" "$htable" "$RECOVERY_FROM" "$RECOVERY_TO" "recovery"
+done
+
+# Сводный файл с несколькими ключевыми метриками
+echo "Формирую all_key_metrics.csv..."
+TS_BL_FROM=$(run_sql "SELECT EXTRACT(EPOCH FROM TIMESTAMP '${BASELINE_FROM}')::bigint;")
+TS_REC_TO=$(run_sql "SELECT EXTRACT(EPOCH FROM TIMESTAMP '${RECOVERY_TO}')::bigint;")
+TS_ATK_FROM=$(run_sql "SELECT EXTRACT(EPOCH FROM TIMESTAMP '${ATTACK_FROM}')::bigint;")
+TS_REC_FROM=$(run_sql "SELECT EXTRACT(EPOCH FROM TIMESTAMP '${RECOVERY_FROM}')::bigint;")
+
+echo "timestamp,phase,inbound_pps,cpu_system_pct,tcp_total,tcp_syn_recv,response_time_sec,ddos_threat_score" > "${OUT_DIR}/all_key_metrics.csv"
+
+psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -t -A -F',' -c "
+SELECT
+    TO_TIMESTAMP(t.clock)::text,
+    CASE
+        WHEN t.clock < ${TS_ATK_FROM}  THEN 'baseline'
+        WHEN t.clock < ${TS_REC_FROM}  THEN 'attack'
+        ELSE 'recovery'
+    END,
+    COALESCE(pps.val::text,  ''),
+    COALESCE(cpu.val::text,  ''),
+    COALESCE(tcpt.val::text, ''),
+    COALESCE(synr.val::text, ''),
+    COALESCE(rt.val::text,   ''),
+    COALESCE(ais.val::text,  '')
+FROM (
+    SELECT DISTINCT h.clock
+    FROM history_uint h
+    JOIN items i  ON h.itemid = i.itemid
+    JOIN hosts hh ON i.hostid = hh.hostid
+    WHERE hh.name = '${HOST_NAME}'
+      AND h.clock BETWEEN ${TS_BL_FROM} AND ${TS_REC_TO}
+) t
+LEFT JOIN (
+    SELECT h.clock, h.value AS val
+    FROM history_uint h JOIN items i ON h.itemid=i.itemid JOIN hosts hh ON i.hostid=hh.hostid
+    WHERE hh.name='${HOST_NAME}' AND i.key_='net.if.in[enp0s3,packets]'
+) pps  ON pps.clock  = t.clock
+LEFT JOIN (
+    SELECT h.clock, h.value AS val
+    FROM history h JOIN items i ON h.itemid=i.itemid JOIN hosts hh ON i.hostid=hh.hostid
+    WHERE hh.name='${HOST_NAME}' AND i.key_='system.cpu.util[,system]'
+) cpu  ON cpu.clock  = t.clock
+LEFT JOIN (
+    SELECT h.clock, h.value AS val
+    FROM history_uint h JOIN items i ON h.itemid=i.itemid JOIN hosts hh ON i.hostid=hh.hostid
+    WHERE hh.name='${HOST_NAME}' AND i.key_='tcp.total'
+) tcpt ON tcpt.clock = t.clock
+LEFT JOIN (
+    SELECT h.clock, h.value AS val
+    FROM history_uint h JOIN items i ON h.itemid=i.itemid JOIN hosts hh ON i.hostid=hh.hostid
+    WHERE hh.name='${HOST_NAME}' AND i.key_='tcp.syn_recv'
+) synr ON synr.clock = t.clock
+LEFT JOIN (
+    SELECT h.clock, h.value AS val
+    FROM history h JOIN items i ON h.itemid=i.itemid JOIN hosts hh ON i.hostid=hh.hostid
+    WHERE hh.name='${HOST_NAME}' AND i.key_='web.test.time[JuiceShop Monitoring,Main,resp]'
+) rt   ON rt.clock   = t.clock
+LEFT JOIN (
+    SELECT h.clock, h.value AS val
+    FROM history h JOIN items i ON h.itemid=i.itemid JOIN hosts hh ON i.hostid=hh.hostid
+    WHERE hh.name='${HOST_NAME}' AND i.key_='ddos.threat.score'
+) ais  ON ais.clock  = t.clock
+ORDER BY t.clock;" 2>/dev/null >> "${OUT_DIR}/all_key_metrics.csv"
+
+echo "Готово. Файлы в $OUT_DIR"
